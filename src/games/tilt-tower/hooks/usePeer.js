@@ -1,38 +1,34 @@
 /**
- * usePeer.js — PeerJS WebRTC hook (singleton-safe)
+ * usePeer.js — Fast & Robust PeerJS WebRTC hook (Singleton-safe)
  *
- * IMPORTANT: Call this hook ONCE at the App level only.
- * The peerRef / connRef live as long as App lives (page lifetime),
- * so the connection survives the Lobby → Game screen transition.
- *
- * Provides:
- *  - createRoom()        → generates 4-digit code, opens PeerJS peer, waits
- *  - joinRoom(code)      → dials the host peer
- *  - sendTiltAxis(a, v)  → sends tilt data over the data channel
- *  - sendGameOver()      → notifies remote of game over
- *  - sendRevive()        → notifies remote to revive
- *
- * Message protocol (JSON):
- *   { type: 'tilt',     axis: 'X'|'Z', value: number }
- *   { type: 'spawn',    block: Block }   ← host→client block sync
- *   { type: 'start' }
- *   { type: 'gameover' }
- *   { type: 'revive' }
- *
- * peerSend is also registered in gameStore so deep components like
- * BlockSpawner can send messages without prop-drilling.
+ * Features:
+ *  - Google STUN ICE servers configured for fast NAT traversal
+ *  - Automatic cleanup of stale peer instances
+ *  - Automatic retry & fallback code generation on ID collision
+ *  - 10-second connection timeout watchdog to prevent hanging
  */
 import { useEffect, useRef, useCallback } from 'react'
 import Peer from 'peerjs'
 import useGameStore from '../store/gameStore'
 
-/** Generates a random 4-char uppercase alphanumeric room code. */
+const PEER_CONFIG = {
+  debug: 0,
+  config: {
+    iceServers: [
+      { urls: 'stun:stun.l.google.com:19302' },
+      { urls: 'stun:stun1.l.google.com:19302' },
+      { urls: 'stun:stun2.l.google.com:19302' },
+      { urls: 'stun:stun3.l.google.com:19302' },
+      { urls: 'stun:stun4.l.google.com:19302' },
+    ],
+  },
+}
+
 function generateRoomCode() {
   const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'
   return Array.from({ length: 4 }, () => chars[Math.floor(Math.random() * chars.length)]).join('')
 }
 
-/** Deterministic PeerJS peer ID: "ttc-<CODE>-host" or "ttc-<CODE>-client" */
 function peerId(code, role) {
   return `ttc-${code.toUpperCase()}-${role}`
 }
@@ -40,34 +36,31 @@ function peerId(code, role) {
 export function usePeer() {
   const peerRef = useRef(null)
   const connRef = useRef(null)
+  const timeoutRef = useRef(null)
 
-  // Pull stable store setters once (these functions never change)
   const {
     setRoomCode, setPlayerRole, setConnectionStatus, setConnectionError,
     setGamePhase, setTiltX, setTiltZ, triggerGameOver, startGame,
     addBlock, incrementBlockCount, setPeerSend,
   } = useGameStore.getState()
 
-  // ── Raw send (stable ref) ────────────────────────────────────────
   const sendMessage = useCallback((msg) => {
     if (connRef.current && connRef.current.open) {
       connRef.current.send(JSON.stringify(msg))
     }
   }, [])
 
-  // Register peerSend in Zustand so BlockSpawner et al. can reach it
   useEffect(() => {
     setPeerSend(sendMessage)
-    // No cleanup: App never unmounts during gameplay.
-    // peerSend is nulled in resetToLobby() inside the store action.
   }, [sendMessage, setPeerSend])
 
-  // ── Destroy peer when game resets to lobby ───────────────────────
+  // Destroy peer when game resets to lobby
   useEffect(() => {
     const unsub = useGameStore.subscribe(
       (s) => s.gamePhase,
       (phase) => {
         if (phase === 'lobby') {
+          if (timeoutRef.current) clearTimeout(timeoutRef.current)
           connRef.current?.close()
           peerRef.current?.destroy()
           connRef.current = null
@@ -78,26 +71,24 @@ export function usePeer() {
     return unsub
   }, [])
 
-  // ── Final cleanup when page closes ──────────────────────────────
+  // Final cleanup on unmount
   useEffect(() => {
     return () => {
+      if (timeoutRef.current) clearTimeout(timeoutRef.current)
       connRef.current?.close()
       peerRef.current?.destroy()
     }
   }, [])
 
-  // ── Incoming message handler ─────────────────────────────────────
   const handleMessage = useCallback((data) => {
     try {
       const msg = typeof data === 'string' ? JSON.parse(data) : data
       switch (msg.type) {
         case 'tilt':
-          // Remote player sent their axis update
           if (msg.axis === 'X') setTiltX(msg.value)
           if (msg.axis === 'Z') setTiltZ(msg.value)
           break
         case 'spawn':
-          // Client receives a block spawned by the host
           addBlock(msg.block)
           incrementBlockCount()
           break
@@ -118,7 +109,6 @@ export function usePeer() {
     }
   }, [setTiltX, setTiltZ, startGame, triggerGameOver, setGamePhase, addBlock, incrementBlockCount])
 
-  // ── Wire up a DataChannel connection ─────────────────────────────
   const attachConnection = useCallback((conn) => {
     connRef.current = conn
     conn.on('data', handleMessage)
@@ -133,7 +123,14 @@ export function usePeer() {
   }, [handleMessage, setConnectionStatus, setConnectionError])
 
   // ── CREATE ROOM (Host) ────────────────────────────────────────────
-  const createRoom = useCallback(() => {
+  const createRoom = useCallback((retryCount = 0) => {
+    // 1. Clean up existing peer & connection
+    if (timeoutRef.current) clearTimeout(timeoutRef.current)
+    connRef.current?.close()
+    peerRef.current?.destroy()
+    connRef.current = null
+    peerRef.current = null
+
     const code = generateRoomCode()
     const id = peerId(code, 'host')
 
@@ -142,91 +139,119 @@ export function usePeer() {
     setConnectionStatus('waiting')
     setConnectionError(null)
 
-    const peer = new Peer(id, { debug: 0 })
-    peerRef.current = peer
+    // 10-second connection watchdog
+    timeoutRef.current = setTimeout(() => {
+      if (useGameStore.getState().connectionStatus === 'waiting' && !connRef.current?.open) {
+        setConnectionError('Room creation timed out. Click below to retry.')
+        setConnectionStatus('error')
+      }
+    }, 10000)
 
-    peer.on('open', () => {
-      console.log('[PeerJS] Host peer open:', id)
-    })
+    try {
+      const peer = new Peer(id, PEER_CONFIG)
+      peerRef.current = peer
 
-    peer.on('connection', (conn) => {
-      console.log('[PeerJS] Client connected!')
-      attachConnection(conn)
-      conn.on('open', () => {
-        setConnectionStatus('connected')
-        // Tell client to start simultaneously
-        conn.send(JSON.stringify({ type: 'start' }))
-        startGame()
+      peer.on('open', () => {
+        if (timeoutRef.current) clearTimeout(timeoutRef.current)
+        console.log('[PeerJS] Host peer open:', id)
       })
-    })
 
-    peer.on('error', (err) => {
-      console.error('[PeerJS] Peer error:', err)
-      setConnectionError(err.message || 'Connection failed. Try again.')
+      peer.on('connection', (conn) => {
+        if (timeoutRef.current) clearTimeout(timeoutRef.current)
+        attachConnection(conn)
+        conn.on('open', () => {
+          setConnectionStatus('connected')
+          conn.send(JSON.stringify({ type: 'start' }))
+          startGame()
+        })
+      })
+
+      peer.on('error', (err) => {
+        if (timeoutRef.current) clearTimeout(timeoutRef.current)
+        console.error('[PeerJS] Host peer error:', err)
+
+        if (err.type === 'unavailable-id' && retryCount < 3) {
+          console.warn('[PeerJS] ID collision, retrying with new code...')
+          return createRoom(retryCount + 1)
+        }
+
+        setConnectionError(err.message || 'Connection failed. Try again.')
+        setConnectionStatus('error')
+      })
+    } catch (e) {
+      if (timeoutRef.current) clearTimeout(timeoutRef.current)
+      setConnectionError('Failed to initialize connection.')
       setConnectionStatus('error')
-    })
+    }
 
     return code
   }, [setRoomCode, setPlayerRole, setConnectionStatus, setConnectionError, attachConnection, startGame])
 
   // ── JOIN ROOM (Client) ────────────────────────────────────────────
   const joinRoom = useCallback((code) => {
+    if (timeoutRef.current) clearTimeout(timeoutRef.current)
+    connRef.current?.close()
+    peerRef.current?.destroy()
+    connRef.current = null
+    peerRef.current = null
+
     const trimmed = code.trim().toUpperCase()
     if (trimmed.length < 4) {
       setConnectionError('Room code must be 4 characters.')
       return
     }
 
-    const clientId = peerId(trimmed, 'client')
-    const hostId   = peerId(trimmed, 'host')
+    const clientId = peerId(`${trimmed}-${Math.floor(Math.random()*1000)}`, 'client')
+    const hostId = peerId(trimmed, 'host')
 
     setRoomCode(trimmed)
     setPlayerRole('client')
     setConnectionStatus('waiting')
     setConnectionError(null)
 
-    const peer = new Peer(clientId, { debug: 0 })
-    peerRef.current = peer
-
-    peer.on('open', () => {
-      console.log('[PeerJS] Client peer open, connecting to host:', hostId)
-      const conn = peer.connect(hostId, { reliable: true })
-      attachConnection(conn)
-      conn.on('open', () => {
-        console.log('[PeerJS] Connected to host!')
-        setConnectionStatus('connected')
-      })
-    })
-
-    peer.on('error', (err) => {
-      console.error('[PeerJS] Error:', err)
-      let msg = err.message || 'Connection failed.'
-      if (err.type === 'peer-unavailable') {
-        msg = 'Room not found. Check the code and try again.'
+    // 10-second join watchdog
+    timeoutRef.current = setTimeout(() => {
+      if (useGameStore.getState().connectionStatus === 'waiting' && !connRef.current?.open) {
+        setConnectionError('Could not reach room. Verify host is active.')
+        setConnectionStatus('error')
       }
-      setConnectionError(msg)
+    }, 10000)
+
+    try {
+      const peer = new Peer(clientId, PEER_CONFIG)
+      peerRef.current = peer
+
+      peer.on('open', () => {
+        console.log('[PeerJS] Client peer open, connecting to host:', hostId)
+        const conn = peer.connect(hostId, { reliable: true })
+        attachConnection(conn)
+        conn.on('open', () => {
+          if (timeoutRef.current) clearTimeout(timeoutRef.current)
+          setConnectionStatus('connected')
+        })
+      })
+
+      peer.on('error', (err) => {
+        if (timeoutRef.current) clearTimeout(timeoutRef.current)
+        let msg = err.message || 'Connection failed.'
+        if (err.type === 'peer-unavailable') {
+          msg = 'Room not found. Make sure Host created the room first.'
+        }
+        setConnectionError(msg)
+        setConnectionStatus('error')
+      })
+    } catch (e) {
+      if (timeoutRef.current) clearTimeout(timeoutRef.current)
+      setConnectionError('Failed to join room.')
       setConnectionStatus('error')
-    })
+    }
   }, [setRoomCode, setPlayerRole, setConnectionStatus, setConnectionError, attachConnection])
-
-  // ── SEND HELPERS ─────────────────────────────────────────────────
-  const sendTiltAxis = useCallback((axis, value) => {
-    sendMessage({ type: 'tilt', axis, value })
-  }, [sendMessage])
-
-  const sendGameOver = useCallback(() => {
-    sendMessage({ type: 'gameover' })
-  }, [sendMessage])
-
-  const sendRevive = useCallback(() => {
-    sendMessage({ type: 'revive' })
-  }, [sendMessage])
 
   return {
     createRoom,
     joinRoom,
-    sendTiltAxis,
-    sendGameOver,
-    sendRevive,
+    sendTiltAxis: (axis, value) => sendMessage({ type: 'tilt', axis, value }),
+    sendGameOver: () => sendMessage({ type: 'gameover' }),
+    sendRevive: () => sendMessage({ type: 'revive' }),
   }
 }

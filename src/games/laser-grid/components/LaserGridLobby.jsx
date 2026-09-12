@@ -4,11 +4,13 @@
 import React, { useState } from 'react'
 import { Link } from 'react-router-dom'
 import useLaserGridStore from '../store/laserGridStore'
+import LaserGridHowToPlay from './LaserGridHowToPlay'
 
 export default function LaserGridLobby({ createRoom, joinRoom }) {
   const { roomCode, connectionStatus, connectionError, startGame, setPlayerRole } = useLaserGridStore()
   const [joinInput, setJoinInput] = useState('')
   const [copied, setCopied] = useState(false)
+  const [showHelp, setShowHelp] = useState(false)
 
   const handleCopy = () => {
     if (!roomCode) return
@@ -82,16 +84,23 @@ export default function LaserGridLobby({ createRoom, joinRoom }) {
 
         {/* Error Alert */}
         {connectionError && (
-          <div className="w-full p-3 rounded-lg bg-red-900/50 border border-red-500/50 text-red-300 text-xs text-center font-medium">
-            ⚠️ {connectionError}
+          <div className="w-full p-3.5 rounded-xl bg-red-950/60 border border-red-500/60 text-red-300 text-xs text-center font-medium flex flex-col items-center gap-2">
+            <span>⚠️ {connectionError}</span>
+            <button
+              onClick={() => createRoom()}
+              className="px-4 py-1.5 rounded-lg bg-red-500/20 border border-red-400/50 text-red-200 font-bold text-xs hover:bg-red-500/30 transition"
+              style={{ fontFamily: 'Orbitron, monospace' }}
+            >
+              ⚡ RETRY ROOM CREATION
+            </button>
           </div>
         )}
 
         {/* Action Buttons */}
-        <div className="w-full flex flex-col gap-4 mt-2">
+        <div className="w-full flex flex-col gap-3.5 mt-1">
           {/* Host Game Button */}
           <button
-            onClick={createRoom}
+            onClick={() => createRoom()}
             className="w-full py-4 rounded-xl font-black text-sm tracking-widest transition-all duration-200 hover:scale-[1.02] active:scale-98"
             style={{
               fontFamily: 'Orbitron, monospace',
@@ -143,10 +152,24 @@ export default function LaserGridLobby({ createRoom, joinRoom }) {
           >
             🎮 SOLO PRACTICE / TEST MODE
           </button>
+
+          {/* How to Play Guide Button */}
+          <button
+            onClick={() => setShowHelp(true)}
+            className="w-full py-3 rounded-xl font-bold text-xs tracking-widest transition-all hover:scale-[1.01]"
+            style={{
+              fontFamily: 'Orbitron, monospace',
+              background: 'rgba(0,245,255,0.05)',
+              border: '1px solid rgba(0,245,255,0.3)',
+              color: '#00f5ff',
+            }}
+          >
+            ❓ HOW TO PLAY LASER GRID ❓
+          </button>
         </div>
 
-        {/* How to Play Quick Cards */}
-        <div className="w-full grid grid-cols-2 gap-3 mt-4 text-xs text-white/50">
+        {/* Quick Role Info */}
+        <div className="w-full grid grid-cols-2 gap-3 mt-2 text-xs text-white/50">
           <div className="p-3 rounded-lg bg-pink-950/20 border border-pink-500/20">
             <div className="font-bold text-pink-400 mb-1 font-mono">PLAYER 1 (RED)</div>
             <div>Controls Laser Emitters & direction angles to align initial beams.</div>
@@ -165,6 +188,9 @@ export default function LaserGridLobby({ createRoom, joinRoom }) {
           ← BACK TO DUO GAMES HUB
         </Link>
       </div>
+
+      {/* How to Play Overlay Modal */}
+      {showHelp && <LaserGridHowToPlay onClose={() => setShowHelp(false)} />}
     </div>
   )
 }

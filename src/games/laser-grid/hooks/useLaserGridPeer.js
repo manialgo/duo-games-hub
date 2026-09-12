@@ -1,9 +1,22 @@
 /**
- * useLaserGridPeer.js — PeerJS WebRTC hook for Laser Grid Co-Op
+ * useLaserGridPeer.js — Fast & Robust PeerJS WebRTC hook for Laser Grid Co-Op
  */
 import { useEffect, useRef, useCallback } from 'react'
 import Peer from 'peerjs'
 import useLaserGridStore from '../store/laserGridStore'
+
+const PEER_CONFIG = {
+  debug: 0,
+  config: {
+    iceServers: [
+      { urls: 'stun:stun.l.google.com:19302' },
+      { urls: 'stun:stun1.l.google.com:19302' },
+      { urls: 'stun:stun2.l.google.com:19302' },
+      { urls: 'stun:stun3.l.google.com:19302' },
+      { urls: 'stun:stun4.l.google.com:19302' },
+    ],
+  },
+}
 
 function generateRoomCode() {
   const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'
@@ -17,6 +30,7 @@ function peerId(code, role) {
 export function useLaserGridPeer() {
   const peerRef = useRef(null)
   const connRef = useRef(null)
+  const timeoutRef = useRef(null)
 
   const {
     setRoomCode, setPlayerRole, setConnectionStatus, setConnectionError,
@@ -39,6 +53,7 @@ export function useLaserGridPeer() {
       (s) => s.gamePhase,
       (phase) => {
         if (phase === 'lobby') {
+          if (timeoutRef.current) clearTimeout(timeoutRef.current)
           connRef.current?.close()
           peerRef.current?.destroy()
           connRef.current = null
@@ -47,6 +62,15 @@ export function useLaserGridPeer() {
       }
     )
     return unsub
+  }, [])
+
+  // Final cleanup
+  useEffect(() => {
+    return () => {
+      if (timeoutRef.current) clearTimeout(timeoutRef.current)
+      connRef.current?.close()
+      peerRef.current?.destroy()
+    }
   }, [])
 
   const handleMessage = useCallback((data) => {
@@ -89,7 +113,13 @@ export function useLaserGridPeer() {
     })
   }, [handleMessage, setConnectionStatus, setConnectionError])
 
-  const createRoom = useCallback(() => {
+  const createRoom = useCallback((retryCount = 0) => {
+    if (timeoutRef.current) clearTimeout(timeoutRef.current)
+    connRef.current?.close()
+    peerRef.current?.destroy()
+    connRef.current = null
+    peerRef.current = null
+
     const code = generateRoomCode()
     const id = peerId(code, 'host')
 
@@ -98,34 +128,65 @@ export function useLaserGridPeer() {
     setConnectionStatus('waiting')
     setConnectionError(null)
 
-    const peer = new Peer(id, { debug: 0 })
-    peerRef.current = peer
+    // 10-second timeout watchdog
+    timeoutRef.current = setTimeout(() => {
+      if (useLaserGridStore.getState().connectionStatus === 'waiting' && !connRef.current?.open) {
+        setConnectionError('Room creation timed out. Click below to retry.')
+        setConnectionStatus('error')
+      }
+    }, 10000)
 
-    peer.on('connection', (conn) => {
-      attachConnection(conn)
-      conn.on('open', () => {
-        setConnectionStatus('connected')
-        conn.send(JSON.stringify({ type: 'start' }))
-        startGame()
+    try {
+      const peer = new Peer(id, PEER_CONFIG)
+      peerRef.current = peer
+
+      peer.on('open', () => {
+        if (timeoutRef.current) clearTimeout(timeoutRef.current)
+        console.log('[LaserGridPeer] Host peer open:', id)
       })
-    })
 
-    peer.on('error', (err) => {
-      setConnectionError(err.message || 'Connection failed.')
+      peer.on('connection', (conn) => {
+        if (timeoutRef.current) clearTimeout(timeoutRef.current)
+        attachConnection(conn)
+        conn.on('open', () => {
+          setConnectionStatus('connected')
+          conn.send(JSON.stringify({ type: 'start' }))
+          startGame()
+        })
+      })
+
+      peer.on('error', (err) => {
+        if (timeoutRef.current) clearTimeout(timeoutRef.current)
+        if (err.type === 'unavailable-id' && retryCount < 3) {
+          console.warn('[LaserGridPeer] Code collision, retrying...')
+          return createRoom(retryCount + 1)
+        }
+        setConnectionError(err.message || 'Connection failed.')
+        setConnectionStatus('error')
+      })
+    } catch (e) {
+      if (timeoutRef.current) clearTimeout(timeoutRef.current)
+      setConnectionError('Failed to create room.')
       setConnectionStatus('error')
-    })
+    }
 
     return code
   }, [setRoomCode, setPlayerRole, setConnectionStatus, setConnectionError, attachConnection, startGame])
 
   const joinRoom = useCallback((code) => {
+    if (timeoutRef.current) clearTimeout(timeoutRef.current)
+    connRef.current?.close()
+    peerRef.current?.destroy()
+    connRef.current = null
+    peerRef.current = null
+
     const trimmed = code.trim().toUpperCase()
     if (trimmed.length < 4) {
       setConnectionError('Enter a 4-character room code.')
       return
     }
 
-    const clientId = peerId(trimmed, 'client')
+    const clientId = peerId(`${trimmed}-${Math.floor(Math.random()*1000)}`, 'client')
     const hostId = peerId(trimmed, 'host')
 
     setRoomCode(trimmed)
@@ -133,25 +194,40 @@ export function useLaserGridPeer() {
     setConnectionStatus('waiting')
     setConnectionError(null)
 
-    const peer = new Peer(clientId, { debug: 0 })
-    peerRef.current = peer
-
-    peer.on('open', () => {
-      const conn = peer.connect(hostId, { reliable: true })
-      attachConnection(conn)
-      conn.on('open', () => {
-        setConnectionStatus('connected')
-      })
-    })
-
-    peer.on('error', (err) => {
-      let msg = err.message || 'Connection failed.'
-      if (err.type === 'peer-unavailable') {
-        msg = 'Room not found. Check code.'
+    timeoutRef.current = setTimeout(() => {
+      if (useLaserGridStore.getState().connectionStatus === 'waiting' && !connRef.current?.open) {
+        setConnectionError('Could not reach room. Make sure Host created the room first.')
+        setConnectionStatus('error')
       }
-      setConnectionError(msg)
+    }, 10000)
+
+    try {
+      const peer = new Peer(clientId, PEER_CONFIG)
+      peerRef.current = peer
+
+      peer.on('open', () => {
+        const conn = peer.connect(hostId, { reliable: true })
+        attachConnection(conn)
+        conn.on('open', () => {
+          if (timeoutRef.current) clearTimeout(timeoutRef.current)
+          setConnectionStatus('connected')
+        })
+      })
+
+      peer.on('error', (err) => {
+        if (timeoutRef.current) clearTimeout(timeoutRef.current)
+        let msg = err.message || 'Connection failed.'
+        if (err.type === 'peer-unavailable') {
+          msg = 'Room not found. Check code.'
+        }
+        setConnectionError(msg)
+        setConnectionStatus('error')
+      })
+    } catch (e) {
+      if (timeoutRef.current) clearTimeout(timeoutRef.current)
+      setConnectionError('Failed to join room.')
       setConnectionStatus('error')
-    })
+    }
   }, [setRoomCode, setPlayerRole, setConnectionStatus, setConnectionError, attachConnection])
 
   return {
