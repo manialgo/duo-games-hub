@@ -6,6 +6,7 @@ import { BrowserRouter, Routes, Route } from 'react-router-dom'
 import Hub from './components/Hub'
 import Auth from './components/Auth'
 import TiltTowerGameWrapper from './games/tilt-tower/TiltTowerWrapper'
+import LaserGridWrapper from './games/laser-grid/LaserGridWrapper'
 
 export default function App() {
   return (
@@ -14,6 +15,7 @@ export default function App() {
         <Route path="/" element={<Hub />} />
         <Route path="/auth" element={<Auth />} />
         <Route path="/play/tilt-tower" element={<TiltTowerGameWrapper />} />
+        <Route path="/play/laser-grid" element={<LaserGridWrapper />} />
       </Routes>
     </BrowserRouter>
   )

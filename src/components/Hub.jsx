@@ -12,10 +12,18 @@ const GAMES = [
     path: '/play/tilt-tower'
   },
   {
+    id: 'laser-grid',
+    title: 'LASER GRID CO-OP',
+    desc: '2-PLAYER OPTICAL PUZZLE DUO',
+    color: '#ff0055',
+    active: true,
+    path: '/play/laser-grid'
+  },
+  {
     id: 'neon-pong',
     title: 'NEON PONG (SOON)',
     desc: 'CLASSIC DUEL',
-    color: '#ff00ff',
+    color: '#00ff88',
     active: false,
     path: '#'
   }
@@ -29,7 +37,7 @@ export default function Hub() {
   }, [initAuth])
 
   return (
-    <div className="relative flex flex-col items-center w-full h-full bg-dark-900 overflow-hidden p-6 text-white">
+    <div className="relative flex flex-col items-center w-full min-h-screen bg-[#050515] overflow-y-auto p-6 text-white">
       {/* Background */}
       <div className="absolute inset-0 opacity-10 pointer-events-none"
         style={{
@@ -76,10 +84,10 @@ export default function Hub() {
         {GAMES.map(game => (
           <div 
             key={game.id} 
-            className={`flex flex-col p-6 rounded-xl border ${game.active ? 'hover:scale-105 transition-transform cursor-pointer' : 'opacity-50 cursor-not-allowed'}`}
+            className={`flex flex-col p-6 rounded-xl border ${game.active ? 'hover:scale-[1.02] transition-transform cursor-pointer' : 'opacity-50 cursor-not-allowed'}`}
             style={{
-              borderColor: `rgba(${game.color === '#00f5ff' ? '0,245,255' : '255,0,255'}, 0.3)`,
-              background: `rgba(${game.color === '#00f5ff' ? '0,245,255' : '255,0,255'}, 0.05)`,
+              borderColor: `${game.color}50`,
+              background: `${game.color}0d`,
             }}
           >
             <h3 className="text-2xl font-black mb-2 tracking-wider" style={{ fontFamily: 'Orbitron, monospace', color: game.color }}>
@@ -90,9 +98,9 @@ export default function Hub() {
             {game.active ? (
               <Link 
                 to={game.path}
-                className="mt-auto text-center py-3 rounded font-bold tracking-widest"
+                className="mt-auto text-center py-3 rounded font-bold tracking-widest transition-all hover:opacity-90"
                 style={{
-                  background: `rgba(${game.color === '#00f5ff' ? '0,245,255' : '255,0,255'}, 0.1)`,
+                  background: `${game.color}20`,
                   color: game.color,
                   border: `1px solid ${game.color}`
                 }}
